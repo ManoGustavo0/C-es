@@ -1,4 +1,276 @@
+-- Cães Retro | Interface API 2 Stable + coletor de bombons sem teleporte.
+local function loadRetroBox()
+	assert(type(loadstring)=="function","loadstring indisponível no executor.")
+	local supported,getter=pcall(function() return game.HttpGet end)
+	assert(supported and type(getter)=="function","game:HttpGet indisponível no executor.")
+	local url="https://raw.githubusercontent.com/ManoGustavo0/RetroBox/main/dist/bootstrap/v2.lua"
+	local source=game:HttpGet(url)
+	assert(type(source)=="string" and #source>0,"O bootstrap retornou uma fonte vazia.")
+	local chunk,err=loadstring(source); assert(chunk,err)
+	local Library=chunk({Channel="stable"})
+	assert(type(Library)=="table" and Library.APIVersion==2 and type(Library.CreateWindow)=="function","RetroBox API 2 incompatível.")
+	return Library
+end
+local createCaesRetroUi=(function()
+-- Factory incorporada ao caes.lua pelo build; não é dependência do executor.
+return function(ctx)
+    local Library, player, state = ctx.Library, ctx.player, ctx.state
+    local RS = game:GetService("ReplicatedStorage")
+    local CS = game:GetService("CollectionService")
+    local window = Library:CreateWindow({
+        Id = "CaesRetro-" .. game.GameId, Title = "Cães Retro",
+        Subtitle = "Cães Retro · sobrevivência, combate e evento", Icon = "shield",
+        Theme = "Retro98", Locale = "pt-BR", Settings = true, ShowProfile = true,
+        Launcher = true, LauncherText = "UI", ToggleKey = Enum.KeyCode.RightShift,
+        DestroyOnClose = false, PixelIcons = true, PixelDecorations = true,
+        Tooltips = true, TooltipDelay = .2, SmoothDragging = false,
+        Parent = player:WaitForChild("PlayerGui"), ConfigFolder = "RetroBox/Caes/" .. game.GameId, ConfigVersion = 1,
+        CallbackExecutor = function(callback, args)
+            if type(setthreadidentity) == "function" then setthreadidentity(8) end
+            return callback(table.unpack(args, 1, args.n))
+        end,
+    })
+    if typeof(window.Launcher) == "Instance" then window.Launcher.AutoLocalize = false end
+    local debugState = ctx.debug()
+    debugState.uiWindow = window
+    window:OnDestroy(ctx.unload)
+    for _, resource in pairs(ctx.resources or {}) do if resource then window:Manage(resource) end end
+    local alive, controls = true, {}
+    local function flag(control, key, transform)
+        controls[key] = control
+        window:Manage(window:GetFlagState("caes." .. key):Subscribe(function(value)
+            ctx.set(key, transform and transform(value) or value)
+        end, true), "Disconnect")
+        return control
+    end
+    local function toggle(section, key, title, icon, tooltip)
+        local unavailable = ctx.unavailable and ctx.unavailable[key]
+        local c = section:AddToggle({Id = "caes." .. key, Title = title, Icon = icon,
+            Default = state[key] == true and not unavailable, Disabled = unavailable == true,
+            Tooltip = unavailable and "O módulo necessário não está disponível neste cliente." or tooltip})
+        return flag(c, key)
+    end
+    local overview = window:CreateTab({Title = "Painel", Icon = "home", Columns = 1}):CreateSection({Title = "Rodada e personagem", Icon = "map"})
+    local roundLabel = overview:AddLabel({Id = "caes.round", Title = "Rodada", Icon = "clock", Default = "Carregando..."})
+    local numbers = {}
+    for _, key in ipairs({"coins", "survivals", "dogs", "health", "bonbons", "collected", "gained", "attempts"}) do
+        numbers[key] = window:CreateState(key == "health" and "—" or 0)
+    end
+    local r1 = overview:CreateRow({Gap = 10, StackAt = 440})
+    r1:AddStatCard({Id = "caes.stat.coins", Title = "Moedas", Icon = "coins", State = numbers.coins, TwoWay = false, Format = "Compact"})
+    r1:AddStatCard({Id = "caes.stat.survivals", Title = "Sobrevivências", Icon = "trophy", State = numbers.survivals, TwoWay = false, Format = "Raw"})
+    local r2 = overview:CreateRow({Gap = 10, StackAt = 440})
+    r2:AddStatCard({Id = "caes.stat.dogs", Title = "Cães vivos", Icon = "skull", State = numbers.dogs, TwoWay = false, Format = "Raw"})
+    r2:AddStatCard({Id = "caes.stat.health", Title = "Saúde real", Icon = "shield", State = numbers.health, TwoWay = false, Format = "Raw"})
+    local equipment = overview:AddLabel({Id = "caes.equipment", Title = "Equipamento", Icon = "backpack", Default = "Nenhum item equipado"})
+
+    local eventTab = window:CreateTab({Title = "Evento", Icon = "gift", Columns = 1})
+    local event = eventTab:CreateSection({Title = "Coletor de bombons", Icon = "gift"})
+    local collection = {attempts = 0, confirmed = 0, gained = 0, available = 0, status = "Coletor desligado", errors = 0}
+    debugState.bonbons = collection
+    local collectorToggle = event:AddToggle({Id = "caes.autoBonbons", Title = "Auto coletar bombons", Icon = "magnet",
+        Default = state.autoBonbons == true, Tooltip = "Coleta os bombons do mapa por contato informado. Não move o personagem, não altera sua velocidade e não usa teleporte.",
+        Floating = {Text = "BOMBONS", MobileOnly = true, Position = Vector2.new(.04, .65)}})
+    local eventStatus = event:AddLabel({Id = "caes.bonbons.status", Title = "Estado da coleta", Icon = "info", Default = collection.status})
+    event:AddLabel({Id = "caes.bonbons.help", Title = "Funcionamento", Icon = "info",
+        Default = "O coletor acompanha os bombons que aparecerem durante as rodadas.\nAs coletas são contadas pelo evento de confirmação do servidor.\nO script não compra nem converte moedas em bombons."})
+    local b1 = event:CreateRow({Gap = 10, StackAt = 440})
+    b1:AddStatCard({Id = "caes.stat.bonbons", Title = "Saldo de bombons", Icon = "wallet", State = numbers.bonbons, TwoWay = false, Format = "Raw"})
+    b1:AddStatCard({Id = "caes.stat.collected", Title = "Coletas confirmadas", Icon = "success", State = numbers.collected, TwoWay = false,
+        Format = "Raw", Subtitle = "Confirmações recebidas nesta execução"})
+    local b2 = event:CreateRow({Gap = 10, StackAt = 440})
+    b2:AddStatCard({Id = "caes.stat.gained", Title = "Bombons recebidos", Icon = "gift", State = numbers.gained, TwoWay = false, Format = "Raw"})
+    b2:AddStatCard({Id = "caes.stat.attempts", Title = "Tentativas de coleta", Icon = "magnet", State = numbers.attempts, TwoWay = false,
+        Format = "Raw", Subtitle = "Envio não equivale a coleta confirmada"})
+    local candyModule = RS.Client:FindFirstChild("Bonbons")
+    local candyConfig = candyModule and require(candyModule).Config or nil
+    local tag = candyConfig and candyConfig.Tag or "Bonbon"
+    local collectedAttribute = candyConfig and candyConfig.PickedAttribute or "Collected"
+    local remoteFolder = RS:FindFirstChild("Remotes")
+    local pickup = remoteFolder and remoteFolder:FindFirstChild("BonbonPickup")
+    if pickup and pickup:IsA("RemoteEvent") then
+        window:Manage(pickup.OnClientEvent:Connect(function(_, amount)
+            if not alive then return end
+            amount = tonumber(amount) or 1
+            if amount ~= amount or amount <= 0 or amount == math.huge then return end
+            collection.confirmed += 1; collection.gained += amount
+        end))
+    end
+    local candidates, queue, retries = {}, {}, setmetatable({}, {__mode = "k"})
+    local function available(part)
+        return part:IsA("BasePart") and part.Parent ~= nil and part:IsDescendantOf(workspace)
+            and part:GetAttribute(collectedAttribute) ~= true
+    end
+    local function add(part)
+        if part:IsA("BasePart") and not candidates[part] then candidates[part] = true; queue[#queue + 1] = part end
+    end
+    for _, part in ipairs(CS:GetTagged(tag)) do add(part) end
+    window:Manage(CS:GetInstanceAddedSignal(tag):Connect(add))
+    window:Manage(CS:GetInstanceRemovedSignal(tag):Connect(function(part) candidates[part] = nil; retries[part] = nil end))
+    local cursor = 0
+    local collector = window:CreateTask({Id = "caes.bonbons.worker", Interval = .22, Start = false, OnError = "Stop", Callback = function(token)
+        token:ThrowIfCancelled()
+        local character = player.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not humanoid or humanoid.Health <= 0 or not root then collection.status = "Aguardando personagem vivo"; return end
+        assert(type(firetouchinterest) == "function", "O coletor requer firetouchinterest no executor.")
+        local chosen
+        for _ = 1, #queue do
+            cursor = cursor % #queue + 1
+            local part = queue[cursor]
+            if candidates[part] and available(part) then
+                local record = retries[part]
+                if not record or os.clock() >= record.nextAt then chosen = part; break end
+            end
+        end
+        if not chosen then collection.status = collection.available > 0 and "Aguardando novas confirmações" or "Aguardando bombons no mapa"; return end
+        local record = retries[chosen] or {attempts = 0}
+        record.attempts += 1
+        record.nextAt = os.clock() + (record.attempts >= 3 and 12 or 2)
+        retries[chosen] = record
+        local touching = false
+        token:Manage(function()
+            if touching then pcall(firetouchinterest, root, chosen, 1); touching = false end
+        end)
+        token:ThrowIfCancelled()
+        collection.status = "Coletando bombons · sem mover o personagem"
+        collection.attempts += 1
+        local sent, reason = pcall(firetouchinterest, root, chosen, 0)
+        if not sent then
+            collection.errors += 1; collection.status = "Tentativa adiada: " .. tostring(reason); return
+        end
+        touching = true
+        task.wait(.04)
+        token:ThrowIfCancelled()
+        if touching then pcall(firetouchinterest, root, chosen, 1); touching = false end
+    end})
+    debugState.bonbonJob = collector
+    collectorToggle:BindTask(collector)
+    flag(collectorToggle, "autoBonbons")
+    if type(firetouchinterest) ~= "function" or not pickup then
+        collectorToggle:SetDisabled(true)
+        collectorToggle:SetTooltip("Coletor indisponível: firetouchinterest ou o evento nativo BonbonPickup não foi encontrado.")
+        collectorToggle:SetValue(false, true)
+    end
+
+    local fightTab = window:CreateTab({Title = "Combate", Icon = "target", Columns = 1})
+    local fight = fightTab:CreateSection({Title = "Armas de fogo", Icon = "target"})
+    toggle(fight, "silentAim", "Silent aim", "target", "Direciona os tiros para cães vivos dentro do FOV, usando o caminho de disparo já existente no script.")
+    toggle(fight, "autoReload", "Auto recarga", "tools", "Pede a recarga nativa quando a arma equipada fica sem munição no pente e ainda tem reserva.")
+    flag(fight:AddSlider({Id = "caes.fovDeg", Title = "Campo de visão do silent aim", Icon = "sliders",
+        Min = 10, Max = 170, Step = 1, Default = state.fovDeg, Suffix = "°",
+        Tooltip = "Abertura angular do cone de alvos. O círculo na tela acompanha o FOV da câmera."}), "fovDeg")
+    local turret = fightTab:CreateSection({Title = "Torreta automática", Icon = "tools"})
+    toggle(turret, "autoTurret", "Auto torreta", "target", "Mira e dispara quando você estiver montado numa torreta, respeitando o arco de giro do cano.")
+    toggle(turret, "predict", "Mira preditiva da torreta", "clock", "Compensa movimento do cão e atraso de rede, preservando a correção de mira já usada pelo seu script.")
+    local modes = {"Mais perto da torreta", "Menor vida", "Mais perto de você"}
+    flag(turret:AddDropdown({Id = "caes.turretTarget", Title = "Prioridade do alvo", Icon = "target", Options = modes,
+        Default = modes[state.turretTarget] or modes[1], Tooltip = "Define como a torreta escolhe entre cães que ela consegue alcançar."}),
+        "turretTarget", function(value) return table.find(modes, value) or 1 end)
+    flag(turret:AddSlider({Id = "caes.turretLeadMs", Title = "Antecipação adicional", Icon = "clock",
+        Min = 0, Max = 250, Step = 5, Default = state.turretLeadMs, Suffix = " ms",
+        Tooltip = "Tempo extra somado à compensação de ping da mira preditiva."}), "turretLeadMs")
+    local turretStats = turret:AddLabel({Id = "caes.turret.stats", Title = "Estado da torreta", Icon = "info", Default = "Aguardando..."})
+
+    local survival = window:CreateTab({Title = "Sobrevivência", Icon = "shield", Columns = 1})
+    local protection = survival:CreateSection({Title = "Fuga e mobilidade", Icon = "shield"})
+    toggle(protection, "infStamina", "Stamina infinita", "rocket", "Mantém a stamina do módulo de corrida do jogo, como na versão anterior.")
+    toggle(protection, "autoMini", "Auto minigame de fuga", "keyboard", "Automatiza a luta para escapar quando um cão agarra seu personagem.")
+    toggle(protection, "godMode", "Anti-arrasto e anti-ragdoll", "shield", "Ajuda a escapar e a levantar. Não é invulnerabilidade e não falsifica a vida recebida do servidor.")
+    toggle(protection, "autoHopium", "Auto Hopium", "potion", "Ativa a cura quando o Hopium está equipado, tem carga e sua vida está baixa.")
+    local protectionLabel = protection:AddLabel({Id = "caes.protection.stats", Title = "Proteção observada", Icon = "info", Default = "Carregando..."})
+    local quality = survival:CreateSection({Title = "Qualidade de vida", Icon = "sliders"})
+    toggle(quality, "skipIntro", "Pular introdução", "eye", "Aciona o próprio botão de pular a cinematográfica do jogo.")
+
+    local fovGui = Instance.new("ScreenGui")
+    fovGui.Name = "CaesRetro_Fov"; fovGui.ResetOnSpawn = false; fovGui.IgnoreGuiInset = true; fovGui.DisplayOrder = 20
+    fovGui.Parent = player.PlayerGui; window:Manage(fovGui)
+    local fovCircle = Instance.new("Frame")
+    fovCircle.Name = "SilentAimFov"; fovCircle.AnchorPoint = Vector2.new(.5, .5); fovCircle.Position = UDim2.fromScale(.5, .5)
+    fovCircle.Size = UDim2.fromOffset(130, 130); fovCircle.BackgroundTransparency = 1; fovCircle.Visible = state.silentAim; fovCircle.Parent = fovGui
+    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(1, 0); corner.Parent = fovCircle
+    local outline = Instance.new("UIStroke"); outline.Color = Color3.fromRGB(100, 225, 245); outline.Transparency = .45; outline.Thickness = 1; outline.Parent = fovCircle
+    local fovLabel = Instance.new("TextLabel")
+    fovLabel.BackgroundTransparency = 1; fovLabel.Size = UDim2.fromOffset(150, 20); fovLabel.Position = UDim2.new(.5, -75, 0, -22)
+    fovLabel.Text = "FOV: " .. state.fovDeg .. "°"; fovLabel.TextColor3 = outline.Color; fovLabel.TextStrokeTransparency = .2
+    fovLabel.Font = Enum.Font.Code; fovLabel.TextSize = 12; fovLabel.AutoLocalize = false; fovLabel.Parent = fovCircle
+
+    local function update()
+        if not alive then return end
+        local d = ctx.debug(); if not d then return end
+        local round, shop, leaders = RS:FindFirstChild("Round"), player:FindFirstChild("Shop"), player:FindFirstChild("leaderstats")
+        local rstats, character = player:FindFirstChild("RoundStats"), player.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local status = round and round:GetAttribute("Status") or "Lobby"
+        local ends = round and round:GetAttribute("EndsAt")
+        local remaining = type(ends) == "number" and math.max(0, math.ceil(ends - workspace:GetServerTimeNow())) or 0
+        roundLabel:SetText(string.format("%s · %s · %02d:%02d\nEspecial: %s",
+            tostring(status), tostring(rstats and rstats:GetAttribute("Map") or "Lobby"), math.floor(remaining / 60), remaining % 60,
+            tostring(round and round:GetAttribute("Special") or "Normal")))
+        local dogs = 0; local folder = workspace:FindFirstChild("NPCs")
+        if folder then for _, model in ipairs(folder:GetChildren()) do local h = model:FindFirstChildOfClass("Humanoid"); if h and h.Health > 0 then dogs += 1 end end end
+        local aliveCandies, liveQueue = 0, {}
+        for part in pairs(candidates) do
+            if available(part) then aliveCandies += 1; liveQueue[#liveQueue + 1] = part else candidates[part] = nil; retries[part] = nil end
+        end
+        queue = liveQueue; cursor = 0; collection.available = aliveCandies
+        local survivals = leaders and leaders:FindFirstChild("Survivals")
+        Library:Batch(function()
+            numbers.coins:Set(shop and shop:GetAttribute("Coins") or 0); numbers.bonbons:Set(shop and shop:GetAttribute("Bonbons") or 0)
+            numbers.survivals:Set(survivals and survivals.Value or 0); numbers.dogs:Set(dogs)
+            numbers.health:Set(humanoid and string.format("%.0f / %.0f", humanoid.Health, humanoid.MaxHealth) or "—")
+            numbers.collected:Set(collection.confirmed); numbers.gained:Set(collection.gained); numbers.attempts:Set(collection.attempts)
+        end)
+        local job = collector:GetStatus()
+        eventStatus:SetText(job.LastError and "Erro: " .. tostring(job.LastError)
+            or (job.Requested and collection.status or "Coletor desligado") .. "\nBombons disponíveis: " .. aliveCandies)
+        local tool = character and character:FindFirstChildOfClass("Tool")
+        local weapon = tool and tool.Name or "Nenhum item equipado"
+        if tool and type(tool:GetAttribute("Loaded")) == "number" then weapon ..= string.format(" · %.0f / %.0f munições", tool:GetAttribute("Loaded"), tool:GetAttribute("Reserve") or 0) end
+        equipment:SetText(weapon .. "\nRetroBox " .. Library:GetVersion() .. " · Shift direito abre o menu")
+        local t, g, s = d.turretStats or {}, d.godStats or {}, d.struggleStats or {}
+        turretStats:SetText(string.format("%s · %.0f ms de ping\nMiras enviadas: %d · Eventos de tiro: %d",
+            d.turret and d.turret._manning and "Montada" or "Aguardando montagem", d.ping and d.ping() * 2000 or 0, t.aimed or 0, t.shotEvents or 0))
+        protectionLabel:SetText(string.format("Arrastos: %d · Apertos aceitos: %d\nQuedas reais de vida: %d · Ragdolls interrompidos: %d",
+            g.grabs or 0, s.credit or 0, g.drops or 0, g.ragdollBlocks or 0))
+        fovCircle.Visible = state.silentAim == true
+    end
+    window:CreateTask({Id = "caes.ui.telemetry", Interval = .25, Start = true, OnError = "Continue", Callback = function(token)
+        token:ThrowIfCancelled(); update()
+    end})
+    window:Manage(function() alive = false; table.clear(candidates); table.clear(queue) end)
+    local session = overview:CreateRow({Gap = 10, StackAt = 440})
+    session:AddButton({Id = "caes.hide", Title = "Ocultar menu", Text = "OCULTAR", Icon = "eye",
+        Tooltip = "Oculta o menu e mantém as funções ativas. Reabra com UI ou Shift direito.", Callback = function() window:Hide(); return true end})
+    session:AddButton({Id = "caes.unload", Title = "Encerrar script", Text = "ENCERRAR", Icon = "close",
+        Tooltip = "Desliga as tarefas, limpa a interface e restaura os hooks do script.", Callback = function() ctx.unload(); return true end})
+    local api = {window = window, gui = fovGui, fovCircle = fovCircle, fovLabel = fovLabel, controls = controls, collector = collector, collection = collection}
+    function api.set(key, value)
+        local c = controls[key]
+        if c then
+            if key == "turretTarget" then value = modes[value] or modes[1] end
+            c:SetValue(value)
+        else ctx.set(key, value) end
+    end
+    function api.refresh() update() end
+    function api.cleanup() if alive then alive = false; window:Destroy() end end
+    function api.getSnapshot()
+        return {balance = player:FindFirstChild("Shop") and player.Shop:GetAttribute("Bonbons"), collected = collection.confirmed,
+            gained = collection.gained, attempts = collection.attempts, available = collection.available,
+            enabled = collector:GetStatus().Requested, status = collection.status, diagnostics = window:GetDiagnostics()}
+    end
+    update()
+    window:Notify({Title = "Cães Retro", Content = "Pronto. O coletor sem teleporte está na aba Evento.", Kind = "success", Icon = "gift", Duration = 6})
+    return api
+end
+
+end)()
 local function main()
+	assert(game.GameId == 10765582175, "Este script é para cães/cachorros.")
+	if type(setthreadidentity) == "function" then setthreadidentity(8) end
+	local Library = loadRetroBox()
+	local alive = true
 	local Players = game:GetService("Players")
 	local RunService = game:GetService("RunService")
 	local UserInputService = game:GetService("UserInputService")
@@ -31,9 +303,21 @@ local function main()
 	end
 	-- migração da v1: desativa handlers órfãos (sem unload) e remove painel antigo
 	local legacy = rawget(_G, "__CGM_DEBUG")
+	local savedState, savedStats = {}, {}
+	if legacy then
+		for key,value in pairs(legacy.state or {}) do savedState[key]=value end
+		for _,name in ipairs({"aimStats","reloadStats","turretStats","godStats","struggleStats","introStats"}) do
+			savedStats[name]={}
+			for key,value in pairs(legacy[name] or {}) do
+				if type(value)=="number" and key~="lastHp" then savedStats[name][key]=value end
+			end
+		end
+	end
 	if legacy then
 		if type(legacy.unload) == "function" then
+			local needsLegacyWait = not (legacy.ui and legacy.ui.window)
 			legacy.unload()
+			if needsLegacyWait then task.wait(2.1) end
 		elseif legacy.state then
 			legacy.state.infStamina = false
 			legacy.state.autoMini = false
@@ -42,8 +326,15 @@ local function main()
 		local oldGui = pg and pg:FindFirstChild("CacMenu")
 		if oldGui then oldGui:Destroy() end
 	end
+	_G.__CGM_LOADED = true
 	-- turretTarget: 1 = mais perto da torreta, 2 = menor vida, 3 = mais perto de voce
-	local state = { infStamina = true, autoMini = true, silentAim = false, autoReload = true, autoTurret = true, autoHopium = true, predict = true, godMode = true, skipIntro = true, turretTarget = 1, fovDeg = 90, turretLeadMs = 60 }
+	local state = { infStamina = true, autoMini = true, silentAim = false, autoReload = true, autoTurret = true, autoHopium = true, predict = true, godMode = true, skipIntro = true, turretTarget = 1, fovDeg = 90, turretLeadMs = 60, autoBonbons = true }
+	for key,value in pairs(savedState) do
+		if type(state[key]) == type(value) then state[key]=value end
+	end
+	state.fovDeg = math.clamp(tonumber(state.fovDeg) or 90,10,170)
+	state.turretTarget = math.clamp(math.floor(tonumber(state.turretTarget) or 1),1,3)
+	state.turretLeadMs = math.clamp(tonumber(state.turretLeadMs) or 60,0,250)
 	-- ===== Silent aim: redireciona balas para cães dentro do circulo de FOV =====
 	local oldNearest = GunClient and GunClient._nearestTarget
 	local hookOk = type(oldNearest) == "function"
@@ -185,7 +476,7 @@ local function main()
 	task.spawn(function()
 		local okStats, stats = pcall(function() return game:GetService("Stats") end)
 		if not okStats or not stats then return end
-		while turretOk and _G.__CGM_LOADED do
+		while turretOk and alive do
 			local ok, ms = pcall(function()
 				return stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 			end)
@@ -486,7 +777,7 @@ local function main()
 	-- alarme ("mord") e de contexto (a que distancia o cao estava)
 	local function godWatch(char)
 		local hum = char:WaitForChild("Humanoid", 10)
-		if not hum or not hum:IsA("Humanoid") then return end
+		if not alive or not hum or not hum:IsA("Humanoid") then return end
 		godStats.lastHp = hum.Health
 		table.insert(godConns, hum.HealthChanged:Connect(function(hp)
 			if hp < godStats.lastHp then
@@ -732,7 +1023,12 @@ local function main()
 			end
 		end
 	end)
+	local unloading = false
 	local function unload()
+		if unloading then return end
+		unloading=true; alive=false
+		local owner = _G.__CGM_DEBUG
+		if not uiCleanup and owner and owner.uiWindow then owner.uiWindow:Destroy() end
 		if uiCleanup then uiCleanup(); uiCleanup=nil end
 		if renderConn then renderConn:Disconnect() renderConn = nil end
 		if keyConn then keyConn:Disconnect() keyConn = nil end
@@ -827,463 +1123,19 @@ local function main()
 		end,
 		unload = unload,
 	}
-	-- CAES_UI_REFRESH_V1
-	local createCaesUi = (function()
--- CAES UI refresh. Embedded into caes.lua by install_caes_ui.lua.
-return function(ctx)
-    local Players=game:GetService('Players')
-    local UIS=game:GetService('UserInputService')
-    local RunService=game:GetService('RunService')
-    local TweenService=game:GetService('TweenService')
-    local player=ctx.player
-    local state=ctx.state
-    local alive=true
-    local connections={}
-    local tweens={}
-    local refreshers={}
-    local theme='Ciano'
-    local accents={Ciano=Color3.fromRGB(71,211,233),Violeta=Color3.fromRGB(163,133,255),Verde=Color3.fromRGB(78,218,160)}
-    local C={bg=Color3.fromRGB(13,17,26),side=Color3.fromRGB(17,22,33),card=Color3.fromRGB(21,28,41),hover=Color3.fromRGB(27,36,51),line=Color3.fromRGB(43,54,73),text=Color3.fromRGB(237,242,250),muted=Color3.fromRGB(143,157,181),dim=Color3.fromRGB(93,108,131),red=Color3.fromRGB(246,110,128)}
-    local function accent() return accents[theme] end
-    local function tint(color,amount) return C.card:Lerp(color,amount) end
-    local function make(class,props,parent)
-        local object=Instance.new(class)
-        for key,value in pairs(props) do object[key]=value end
-        object.Parent=parent
-        return object
-    end
-    local function connect(signal,callback)
-        local connection=signal:Connect(callback)
-        table.insert(connections,connection)
-        return connection
-    end
-    local function rounded(parent,radius) return make('UICorner',{CornerRadius=UDim.new(0,radius or 10)},parent) end
-    local function stroke(parent,color,transparency)
-        return make('UIStroke',{Color=color or C.line,Thickness=1,Transparency=transparency or 0,ApplyStrokeMode=Enum.ApplyStrokeMode.Border},parent)
-    end
-    local function text(parent,name,value,x,y,w,h,size,color,bold)
-        return make('TextLabel',{Name=name,Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,h),BackgroundTransparency=1,Text=value,Font=bold and Enum.Font.GothamBold or Enum.Font.Gotham,TextSize=size or 13,TextColor3=color or C.text,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,TextTruncate=Enum.TextTruncate.AtEnd,ZIndex=parent.ZIndex+2},parent)
-    end
-    local function animate(object,props,time)
-        if not alive or not object.Parent then return end
-        if tweens[object] then tweens[object]:Cancel() end
-        local tween=TweenService:Create(object,TweenInfo.new(time or .16,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),props)
-        tweens[object]=tween
-        tween:Play()
-    end
-    local function icon(parent,kind,color,x,y)
-        local frame=make('Frame',{Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(24,24),BackgroundTransparency=1,ZIndex=parent.ZIndex+2},parent)
-        local pieces={}
-        local function piece(px,py,w,h,r)
-            local p=make('Frame',{Position=UDim2.fromOffset(px,py),Size=UDim2.fromOffset(w,h),BackgroundColor3=color,BorderSizePixel=0,ZIndex=frame.ZIndex},frame)
-            if r then rounded(p,r) end
-            table.insert(pieces,p)
-            return p
-        end
-        if kind=='grid' then for _,p in ipairs({{3,3},{14,3},{3,14},{14,14}}) do piece(p[1],p[2],7,7,2) end
-        elseif kind=='aim' then
-            local ring=make('Frame',{Position=UDim2.fromOffset(4,4),Size=UDim2.fromOffset(16,16),BackgroundTransparency=1,ZIndex=frame.ZIndex},frame)
-            rounded(ring,16); table.insert(pieces,stroke(ring,color,0))
-            piece(11,0,2,6,1); piece(11,18,2,6,1); piece(0,11,6,2,1); piece(18,11,6,2,1)
-        elseif kind=='health' then piece(9,3,6,18,2); piece(3,9,18,6,2)
-        elseif kind=='gear' then
-            for i=0,3 do local p=piece(10,1,4,22,2); p.Rotation=i*45 end
-            local core=piece(5,5,14,14,7); core.BackgroundColor3=C.side
-            table.insert(pieces,stroke(core,color,0))
-        elseif kind=='paw' then
-            piece(1,3,5,7,3); piece(7,0,5,7,3); piece(14,0,5,7,3); piece(20,3,5,7,3)
-            piece(6,12,14,11,6)
-        end
-        return function(newColor)
-            for _,p in ipairs(pieces) do
-                if p:IsA('UIStroke') then p.Color=newColor
-                elseif not (kind=='gear' and p.Size.X.Offset==14) then p.BackgroundColor3=newColor end
-            end
-        end
-    end
-    local gui=make('ScreenGui',{Name='CacMenu',ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=60,ZIndexBehavior=Enum.ZIndexBehavior.Sibling},player:WaitForChild('PlayerGui'))
-    local root=make('CanvasGroup',{Name='Panel',Size=UDim2.fromOffset(690,600),Position=UDim2.fromOffset(48,130),BackgroundColor3=C.bg,BorderSizePixel=0,Active=true,ZIndex=100,GroupTransparency=0},gui)
-    rounded(root,16)
-    local rootStroke=stroke(root,C.line,.1)
-    local scale=make('UIScale',{Scale=1},root)
-    local shadow=make('ImageLabel',{Name='Shadow',AnchorPoint=Vector2.new(0,0),Position=UDim2.fromOffset(24,106),Size=UDim2.fromOffset(738,648),BackgroundTransparency=1,Image='rbxassetid://1316045217',ImageColor3=Color3.new(0,0,0),ImageTransparency=.3,ScaleType=Enum.ScaleType.Slice,SliceCenter=Rect.new(10,10,118,118),ZIndex=99,Active=false},gui)
-    local side=make('Frame',{Name='Sidebar',Position=UDim2.fromOffset(0,70),Size=UDim2.fromOffset(160,530),BackgroundColor3=C.side,BorderSizePixel=0,ZIndex=101},root)
-    make('Frame',{Position=UDim2.fromOffset(160,70),Size=UDim2.fromOffset(1,530),BackgroundColor3=C.line,BackgroundTransparency=.3,BorderSizePixel=0,ZIndex=102},root)
-    make('Frame',{Position=UDim2.fromOffset(0,69),Size=UDim2.fromOffset(690,1),BackgroundColor3=C.line,BackgroundTransparency=.3,BorderSizePixel=0,ZIndex=103},root)
-    local header=make('Frame',{Name='Header',Size=UDim2.fromOffset(690,69),BackgroundTransparency=1,Active=true,ZIndex=104},root)
-    local logo=make('Frame',{Position=UDim2.fromOffset(19,16),Size=UDim2.fromOffset(38,38),BackgroundColor3=tint(accent(),.2),BorderSizePixel=0,ZIndex=105},header)
-    rounded(logo,11)
-    local logoColor=icon(logo,'paw',accent(),6,6)
-    text(header,'Brand','CAES',69,14,185,23,21,C.text,true)
-    text(header,'BrandCaption','SURVIVAL CONTROL',70,37,195,16,9,C.muted,true)
-    local badge=make('Frame',{Name='ConnectionBadge',Position=UDim2.fromOffset(475,23),Size=UDim2.fromOffset(103,25),BackgroundColor3=tint(accent(),.13),BorderSizePixel=0,ZIndex=105},header)
-    rounded(badge,8)
-    local badgeDot=make('Frame',{Position=UDim2.fromOffset(10,9),Size=UDim2.fromOffset(7,7),BackgroundColor3=accent(),BorderSizePixel=0,ZIndex=106},badge)
-    rounded(badgeDot,5)
-    local badgeText=text(badge,'Text','ONLINE',25,0,72,25,10,accent(),true)
-    local function smallButton(name,label,x)
-        local b=make('TextButton',{Name=name,Position=UDim2.fromOffset(x,20),Size=UDim2.fromOffset(30,30),BackgroundColor3=C.card,BorderSizePixel=0,Text=label,TextColor3=C.muted,TextSize=20,Font=Enum.Font.Gotham,AutoButtonColor=false,ZIndex=106},header)
-        rounded(b,8)
-        connect(b.MouseEnter,function() animate(b,{BackgroundColor3=C.hover,TextColor3=C.text}) end)
-        connect(b.MouseLeave,function() animate(b,{BackgroundColor3=C.card,TextColor3=C.muted}) end)
-        return b
-    end
-    local minimize=smallButton('Minimize','−',604)
-    local close=smallButton('Close','×',644)
-    local userBox=make('Frame',{Position=UDim2.fromOffset(12,456),Size=UDim2.fromOffset(136,58),BackgroundColor3=C.card,BorderSizePixel=0,ZIndex=103},side)
-    rounded(userBox,10)
-    local avatar=make('TextLabel',{Position=UDim2.fromOffset(10,12),Size=UDim2.fromOffset(30,30),BackgroundColor3=tint(accent(),.13),Text=player.DisplayName:sub(1,1):upper(),TextColor3=accent(),TextSize=15,Font=Enum.Font.GothamBold,BorderSizePixel=0,ZIndex=104},userBox)
-    rounded(avatar,9)
-    text(userBox,'Player',player.DisplayName,48,10,80,20,11,C.text,true)
-    text(userBox,'Client','CLIENTE LOCAL',48,30,81,15,8,C.dim,true)
-    local pageTitle=text(root,'PageTitle','Visão geral',181,90,452,28,23,C.text,true)
-    local pageSubtitle=text(root,'PageSubtitle','Sua rodada em um só lugar.',183,120,480,20,12,C.muted,false)
-    local viewport=make('Frame',{Name='Content',Position=UDim2.fromOffset(181,153),Size=UDim2.fromOffset(489,395),BackgroundTransparency=1,ZIndex=102},root)
-    local footer=text(root,'Footer','INSERT   abrir / ocultar',181,565,271,20,10,C.dim,false)
-    local activeLabel=text(root,'ActiveFeatures','',482,565,189,20,10,C.muted,false)
-    activeLabel.TextXAlignment=Enum.TextXAlignment.Right
-    local pages,nav={},{}
-    local currentTab='Painel'
-    local tabs={
-        {key='Painel',title='Visão geral',subtitle='Sua rodada em um só lugar.',icon='grid'},
-        {key='Combate',title='Combate',subtitle='Mira, recarga e controle da torreta.',icon='aim'},
-        {key='Sobrevivência',title='Sobrevivência',subtitle='Mobilidade, recuperação e fuga.',icon='health'},
-        {key='Ajustes',title='Ajustes',subtitle='Personalize o visual e os controles.',icon='gear'},
-    }
-    local function page(key)
-        local p=make('ScrollingFrame',{Name=key,Size=UDim2.fromScale(1,1),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=C.line,CanvasSize=UDim2.fromOffset(0,0),ScrollingDirection=Enum.ScrollingDirection.Y,Visible=key=='Painel',ZIndex=103},viewport)
-        pages[key]=p
-        return p
-    end
-    local function navRefresh()
-        for key,item in pairs(nav) do
-            local active=key==currentTab
-            item.button.BackgroundColor3=active and tint(accent(),.13) or C.side
-            item.label.TextColor3=active and C.text or C.muted
-            item.mark.Visible=active; item.mark.BackgroundColor3=accent()
-            item.icon(active and accent() or C.dim)
-        end
-    end
-    local function selectTab(key)
-        assert(pages[key],'Aba inválida')
-        currentTab=key
-        for name,p in pairs(pages) do p.Visible=name==key end
-        for _,tab in ipairs(tabs) do
-            if tab.key==key then pageTitle.Text=tab.title; pageSubtitle.Text=tab.subtitle end
-        end
-        navRefresh()
-    end
-    for i,tab in ipairs(tabs) do
-        local p=page(tab.key)
-        local b=make('TextButton',{Name='Tab_'..tab.key,Position=UDim2.fromOffset(12,22+(i-1)*47),Size=UDim2.fromOffset(136,40),BackgroundColor3=C.side,BorderSizePixel=0,Text='',AutoButtonColor=false,ZIndex=104},side)
-        rounded(b,9)
-        local label=text(b,'Label',tab.key,41,0,90,40,12,C.muted,true)
-        local recolor=icon(b,tab.icon,C.dim,10,8)
-        local mark=make('Frame',{Position=UDim2.fromOffset(0,11),Size=UDim2.fromOffset(3,18),BackgroundColor3=accent(),BorderSizePixel=0,Visible=false,ZIndex=105},b)
-        rounded(mark,2)
-        nav[tab.key]={button=b,label=label,icon=recolor,mark=mark}
-        connect(b.Activated,function() selectTab(tab.key) end)
-        connect(b.MouseEnter,function() if currentTab~=tab.key then animate(b,{BackgroundColor3=C.card}) end end)
-        connect(b.MouseLeave,function() if currentTab~=tab.key then animate(b,{BackgroundColor3=C.side}) end end)
-    end
-    local function card(parent,name,x,y,w,h)
-        local c=make('Frame',{Name=name,Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,h),BackgroundColor3=C.card,BorderSizePixel=0,ZIndex=105},parent)
-        rounded(c,11); stroke(c,C.line,.45)
-        return c
-    end
-    local widgets={}
-    local featureKeys={'silentAim','autoReload','autoTurret','predict','infStamina','autoMini','autoHopium','godMode','skipIntro'}
-    local function set(key,value)
-        ctx.set(key,value)
-        if widgets[key] then widgets[key].refresh(true) end
-    end
-    local function toggleCard(parent,key,label,description,x,y)
-        local unavailable=ctx.unavailable and ctx.unavailable[key]
-        local b=make('TextButton',{Name=key,Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(237,88),BackgroundColor3=C.card,BorderSizePixel=0,Text='',AutoButtonColor=false,ZIndex=105},parent)
-        rounded(b,11)
-        local border=stroke(b,C.line,.45)
-        text(b,'Label',label,13,12,163,22,13,unavailable and C.dim or C.text,true)
-        local desc=text(b,'Description',unavailable and 'Indisponível neste cliente.' or description,13,39,210,35,10,C.muted,false)
-        desc.TextWrapped=true; desc.TextTruncate=Enum.TextTruncate.None; desc.TextYAlignment=Enum.TextYAlignment.Top
-        local track=make('Frame',{Name='Switch',Position=UDim2.fromOffset(186,15),Size=UDim2.fromOffset(37,20),BackgroundColor3=C.line,BorderSizePixel=0,ZIndex=106},b)
-        rounded(track,10)
-        local knob=make('Frame',{Name='Knob',Position=UDim2.fromOffset(3,3),Size=UDim2.fromOffset(14,14),BackgroundColor3=C.muted,BorderSizePixel=0,ZIndex=107},track)
-        rounded(knob,10)
-        local last
-        local function refresh(transition)
-            local on=state[key]==true and not unavailable
-            if on==last and not transition then return end
-            last=on
-            local trackColor=on and accent() or C.line
-            local knobColor=on and C.bg or C.muted
-            if transition then
-                animate(track,{BackgroundColor3=trackColor}); animate(knob,{Position=UDim2.fromOffset(on and 20 or 3,3),BackgroundColor3=knobColor})
-            else track.BackgroundColor3=trackColor; knob.Position=UDim2.fromOffset(on and 20 or 3,3); knob.BackgroundColor3=knobColor end
-            border.Color=on and accent() or C.line; border.Transparency=on and .72 or .45
-        end
-        connect(b.Activated,function() if not unavailable then set(key,not state[key]) end end)
-        connect(b.MouseEnter,function() animate(b,{BackgroundColor3=C.hover}) end)
-        connect(b.MouseLeave,function() animate(b,{BackgroundColor3=C.card}) end)
-        widgets[key]={button=b,refresh=refresh}; refresh(false)
-    end
-    toggleCard(pages.Combate,'silentAim','Silent aim','Direciona os tiros para cães no FOV.',0,0)
-    toggleCard(pages.Combate,'autoReload','Auto reload','Recarrega quando o pente esvazia.',249,0)
-    toggleCard(pages.Combate,'autoTurret','Auto torreta','Mira e dispara quando estiver montado.',0,100)
-    toggleCard(pages.Combate,'predict','Mira preditiva','Compensa movimento e atraso da torreta.',249,100)
-    local modes={'Mais perto da torreta','Menor vida','Mais perto de você'}
-    local priorityCard=card(pages.Combate,'TurretPriority',0,212,486,77)
-    text(priorityCard,'Label','Prioridade da torreta',13,10,306,20,12,C.text,true)
-    local priorityButtons={}
-    for i,label in ipairs({'Torreta','Menor vida','Você'}) do
-        local b=make('TextButton',{Name='TurretMode'..i,Position=UDim2.fromOffset(13+(i-1)*154,38),Size=UDim2.fromOffset(145,27),BackgroundColor3=C.bg,Text=label,TextSize=11,TextColor3=C.muted,Font=Enum.Font.GothamMedium,BorderSizePixel=0,AutoButtonColor=false,ZIndex=107},priorityCard)
-        rounded(b,7); priorityButtons[i]=b
-        connect(b.Activated,function() set('turretTarget',i) end)
-    end
-    local modeHint=text(priorityCard,'Selected','',302,10,172,20,9,C.muted,false)
-    modeHint.TextXAlignment=Enum.TextXAlignment.Right
-    local function refreshPriority()
-        local index=math.clamp(tonumber(state.turretTarget) or 1,1,3)
-        for i,b in ipairs(priorityButtons) do b.BackgroundColor3=i==index and tint(accent(),.24) or C.bg; b.TextColor3=i==index and accent() or C.muted end
-        modeHint.Text=modes[index]
-    end
-    table.insert(refreshers,refreshPriority)
-    local fovCard=card(pages.Combate,'FovControl',0,301,486,91)
-    text(fovCard,'Title','Campo de visão',13,9,238,22,13,C.text,true)
-    local fovLabel=text(fovCard,'FovLabel','',325,9,147,22,12,accent(),true)
-    fovLabel.TextXAlignment=Enum.TextXAlignment.Right
-    local minus=make('TextButton',{Name='FovMinus',Position=UDim2.fromOffset(13,43),Size=UDim2.fromOffset(27,25),BackgroundColor3=C.bg,BorderSizePixel=0,Text='−',TextColor3=C.text,Font=Enum.Font.GothamBold,TextSize=16,AutoButtonColor=false,ZIndex=108},fovCard)
-    local plus=make('TextButton',{Name='FovPlus',Position=UDim2.fromOffset(446,43),Size=UDim2.fromOffset(27,25),BackgroundColor3=C.bg,BorderSizePixel=0,Text='+',TextColor3=C.text,Font=Enum.Font.GothamBold,TextSize=16,AutoButtonColor=false,ZIndex=108},fovCard)
-    rounded(minus,6); rounded(plus,6)
-    local track=make('Frame',{Name='Track',Position=UDim2.fromOffset(53,54),Size=UDim2.fromOffset(380,4),BackgroundColor3=C.line,BorderSizePixel=0,Active=true,ZIndex=107},fovCard)
-    rounded(track,4)
-    local fill=make('Frame',{Name='Fill',Size=UDim2.fromScale(.5,1),BackgroundColor3=accent(),BorderSizePixel=0,ZIndex=108},track)
-    rounded(fill,4)
-    local knob=make('Frame',{Name='Knob',AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),Size=UDim2.fromOffset(13,13),BackgroundColor3=accent(),BorderSizePixel=0,ZIndex=109},track)
-    rounded(knob,8)
-    local hitbox=make('TextButton',{Name='Slider',Position=UDim2.fromOffset(47,42),Size=UDim2.fromOffset(392,29),BackgroundTransparency=1,Text='',AutoButtonColor=false,ZIndex=110},fovCard)
-    text(fovCard,'Hint','10°',53,72,100,14,9,C.dim,false)
-    local maxHint=text(fovCard,'Max','170°',359,72,74,14,9,C.dim,false); maxHint.TextXAlignment=Enum.TextXAlignment.Right
-    pages.Combate.CanvasSize=UDim2.fromOffset(0,405)
-    local sliderDrag,sliderInput
-    local function refreshFov()
-        local value=math.clamp(tonumber(state.fovDeg) or 90,10,170)
-        local ratio=(value-10)/160
-        fill.Size=UDim2.fromScale(ratio,1); knob.Position=UDim2.fromScale(ratio,.5)
-        fill.BackgroundColor3=accent(); knob.BackgroundColor3=accent(); fovLabel.TextColor3=accent()
-        fovLabel.Text='FOV: '..math.floor(value)..'°'
-    end
-    local function pointerFov(x)
-        local ratio=math.clamp((x-track.AbsolutePosition.X)/math.max(1,track.AbsoluteSize.X),0,1)
-        set('fovDeg',math.floor(10+ratio*160+.5)); refreshFov()
-    end
-    connect(minus.Activated,function() set('fovDeg',math.clamp(state.fovDeg-5,10,170)); refreshFov() end)
-    connect(plus.Activated,function() set('fovDeg',math.clamp(state.fovDeg+5,10,170)); refreshFov() end)
-    connect(hitbox.InputBegan,function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then sliderDrag=true; sliderInput=input; pointerFov(input.Position.X) end
-    end)
-    table.insert(refreshers,refreshFov)
-    toggleCard(pages['Sobrevivência'],'infStamina','Stamina infinita','Mantém a energia para correr.',0,0)
-    toggleCard(pages['Sobrevivência'],'autoMini','Auto minigame','Automatiza o minigame de fuga.',249,0)
-    toggleCard(pages['Sobrevivência'],'autoHopium','Auto Hopium','Usa a cura quando o item está equipado.',0,100)
-    toggleCard(pages['Sobrevivência'],'godMode','Anti-arrasto','Facilita a fuga e reduz o ragdoll.',249,100)
-    local protection=card(pages['Sobrevivência'],'ProtectionStats',0,212,486,117)
-    text(protection,'Title','TELEMETRIA DA PROTEÇÃO',14,12,445,18,10,C.muted,true)
-    local protectionValue=text(protection,'Value','Aguardando dados...',14,39,445,28,16,C.text,true)
-    local protectionDetail=text(protection,'Detail','',14,77,445,23,11,C.muted,false)
-    toggleCard(pages.Ajustes,'skipIntro','Pular introdução','Usa o botão de pular a cinematográfica.',0,0)
-    local shortcut=card(pages.Ajustes,'Shortcut',249,0,237,88)
-    text(shortcut,'Title','Atalho do painel',13,12,200,22,13,C.text,true)
-    text(shortcut,'Hint','Insert para abrir ou ocultar.',13,44,210,23,11,C.muted,false)
-    local themeCard=card(pages.Ajustes,'Theme',0,100,486,87)
-    text(themeCard,'Title','Cor de destaque',13,9,445,20,13,C.text,true)
-    local themeButtons={}
-    for i,name in ipairs({'Ciano','Violeta','Verde'}) do
-        local b=make('TextButton',{Name='Theme_'..name,Position=UDim2.fromOffset(13+(i-1)*154,40),Size=UDim2.fromOffset(145,30),BackgroundColor3=C.bg,BorderSizePixel=0,Text=name,TextColor3=accents[name],Font=Enum.Font.GothamMedium,TextSize=12,AutoButtonColor=false,ZIndex=108},themeCard)
-        rounded(b,7); themeButtons[name]=b
-    end
-    local actionCard=card(pages.Ajustes,'Actions',0,199,486,118)
-    text(actionCard,'Title','Interface e sessão',13,10,445,23,13,C.text,true)
-    text(actionCard,'Description','Ocultar deixa os recursos ativos. Encerrar descarrega o script.',13,39,452,29,10,C.muted,false).TextWrapped=true
-    local hideAction=make('TextButton',{Name='HideMenu',Position=UDim2.fromOffset(13,78),Size=UDim2.fromOffset(225,28),BackgroundColor3=C.hover,BorderSizePixel=0,Text='Ocultar painel',TextColor3=C.text,Font=Enum.Font.GothamMedium,TextSize=11,AutoButtonColor=false,ZIndex=107},actionCard)
-    local unloadAction=make('TextButton',{Name='Unload',Position=UDim2.fromOffset(249,78),Size=UDim2.fromOffset(225,28),BackgroundColor3=tint(C.red,.16),BorderSizePixel=0,Text='Encerrar script',TextColor3=C.red,Font=Enum.Font.GothamMedium,TextSize=11,AutoButtonColor=false,ZIndex=107},actionCard)
-    rounded(hideAction,7); rounded(unloadAction,7)
-    local hero=card(pages.Painel,'RoundCard',0,0,486,67)
-    local heroAccent=make('Frame',{Position=UDim2.fromOffset(0,13),Size=UDim2.fromOffset(3,41),BackgroundColor3=accent(),BorderSizePixel=0,ZIndex=107},hero); rounded(heroAccent,2)
-    local roundTitle=text(hero,'RoundTitle','Aguardando rodada',15,9,333,23,15,C.text,true)
-    local roundSubtitle=text(hero,'RoundSubtitle','',15,33,351,22,11,C.muted,false)
-    local clock=text(hero,'Clock','--:--',380,12,91,38,19,accent(),true); clock.TextXAlignment=Enum.TextXAlignment.Right
-    local statValues={}
-    for i,item in ipairs({{'Dogs','CÃES VIVOS'},{'Coins','MOEDAS'},{'Survivals','SOBREVIVÊNCIAS'},{'Health','SAÚDE'}}) do
-        local x=((i-1)%2)*249; local y=79+math.floor((i-1)/2)*83
-        local c=card(pages.Painel,item[1],x,y,237,71)
-        text(c,'Label',item[2],13,9,211,18,9,C.muted,true)
-        statValues[item[1]]=text(c,'Value','—',13,28,211,32,23,C.text,true)
-    end
-    local healthBar=make('Frame',{Name='HealthBar',Position=UDim2.fromOffset(13,63),Size=UDim2.fromOffset(211,3),BackgroundColor3=C.line,BorderSizePixel=0,ZIndex=107},pages.Painel.Health)
-    rounded(healthBar,3)
-    local healthFill=make('Frame',{Size=UDim2.fromScale(1,1),BackgroundColor3=accent(),BorderSizePixel=0,ZIndex=108},healthBar); rounded(healthFill,3)
-    local equipment=card(pages.Painel,'Equipment',0,245,486,87)
-    text(equipment,'Title','EQUIPAMENTO & CONEXÃO',13,10,451,17,9,C.muted,true)
-    local equipmentValue=text(equipment,'Value','',13,35,450,24,13,C.text,true)
-    local equipmentNote=text(equipment,'Note','',13,61,452,16,10,C.muted,false)
-    local fovCircle=make('Frame',{Name='SilentAimFov',AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),Size=UDim2.fromOffset(130,130),BackgroundTransparency=1,BorderSizePixel=0,Visible=state.silentAim,Active=false,ZIndex=80},gui)
-    make('UICorner',{CornerRadius=UDim.new(1,0)},fovCircle)
-    local fovStroke=stroke(fovCircle,accent(),.5)
-    local pill=make('TextButton',{Name='TogglePill',Position=UDim2.new(0,24,1,-64),Size=UDim2.fromOffset(147,40),BackgroundColor3=C.side,BorderSizePixel=0,Text='',AutoButtonColor=false,Visible=false,ZIndex=100},gui)
-    rounded(pill,12); stroke(pill,C.line,.1)
-    local pillIcon=icon(pill,'paw',accent(),10,8)
-    text(pill,'Title','CAES',44,0,55,40,13,C.text,true)
-    text(pill,'Key','Insert',103,0,40,40,9,C.muted,false)
-    local visibilityId=0
-    local function setVisible(value)
-        visibilityId+=1
-        local id=visibilityId
-        if value then
-            root.Visible=true; shadow.Visible=true; pill.Visible=false
-            animate(root,{GroupTransparency=0},.14)
-        else
-            pill.Visible=true
-            animate(root,{GroupTransparency=1},.12)
-            task.delay(.13,function() if alive and visibilityId==id then root.Visible=false; shadow.Visible=false end end)
-        end
-    end
-    local function togglePanel() setVisible(not root.Visible or root.GroupTransparency>.5) end
-    connect(minimize.Activated,function() setVisible(false) end)
-    connect(close.Activated,function() setVisible(false) end)
-    connect(hideAction.Activated,function() setVisible(false) end)
-    connect(pill.Activated,function() setVisible(true) end)
-    connect(unloadAction.Activated,function() ctx.unload() end)
-    connect(UIS.InputBegan,function(input,processed)
-        if not processed and input.KeyCode==Enum.KeyCode.Insert then togglePanel() end
-    end)
-    local function setTheme(value)
-        assert(accents[value],'Tema inválido')
-        theme=value
-        logo.BackgroundColor3=tint(accent(),.2); logoColor(accent())
-        badge.BackgroundColor3=tint(accent(),.13); badgeDot.BackgroundColor3=accent(); badgeText.TextColor3=accent()
-        avatar.BackgroundColor3=tint(accent(),.13); avatar.TextColor3=accent(); heroAccent.BackgroundColor3=accent()
-        clock.TextColor3=accent(); fovStroke.Color=accent(); pillIcon(accent())
-        navRefresh(); refreshPriority(); refreshFov()
-        for _,widget in pairs(widgets) do widget.refresh(true) end
-        for name,b in pairs(themeButtons) do b.BackgroundColor3=name==theme and tint(accents[name],.2) or C.bg end
-    end
-    for name,b in pairs(themeButtons) do connect(b.Activated,function() setTheme(name) end) end
-    local dragging,dragInput,dragStart,startPosition
-    local function over(object,position)
-        local p,s=object.AbsolutePosition,object.AbsoluteSize
-        return position.X>=p.X and position.X<=p.X+s.X and position.Y>=p.Y and position.Y<=p.Y+s.Y
-    end
-    connect(header.InputBegan,function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
-            if over(close,input.Position) or over(minimize,input.Position) then return end
-            dragging=true; dragInput=input; dragStart=input.Position; startPosition=root.Position
-        end
-    end)
-    connect(UIS.InputEnded,function(input)
-        if input==dragInput then dragging=false end
-        if input==sliderInput then sliderDrag=false end
-    end)
-    local function viewportSize()
-        local camera=workspace.CurrentCamera
-        return camera and camera.ViewportSize or Vector2.new(1280,720)
-    end
-    local function clampWindow()
-        local vp=viewportSize()
-        scale.Scale=math.clamp(math.min(1,(vp.X-32)/690,(vp.Y-32)/600),.35,1)
-        local size=Vector2.new(690,600)*scale.Scale
-        local x=math.clamp(root.Position.X.Offset,8,math.max(8,vp.X-size.X-8))
-        local y=math.clamp(root.Position.Y.Offset,8,math.max(8,vp.Y-size.Y-8))
-        root.Position=UDim2.fromOffset(x,y)
-        shadow.Position=UDim2.fromOffset(x-24*scale.Scale,y-24*scale.Scale)
-        shadow.Size=UDim2.fromOffset(size.X+48*scale.Scale,size.Y+48*scale.Scale)
-    end
-    connect(UIS.InputChanged,function(input)
-        if sliderDrag and (input.UserInputType==Enum.UserInputType.MouseMovement or input==sliderInput) then pointerFov(input.Position.X) end
-        if dragging and (input.UserInputType==Enum.UserInputType.MouseMovement or input==dragInput) then
-            local d=input.Position-dragStart
-            root.Position=UDim2.fromOffset(startPosition.X.Offset+d.X,startPosition.Y.Offset+d.Y)
-            clampWindow()
-        end
-    end)
-    local function shortNumber(value)
-        value=tonumber(value) or 0
-        if value>=1000000 then return (string.format('%.1fM',value/1000000):gsub('%.',',')) end
-        if value>=10000 then return (string.format('%.1fk',value/1000):gsub('%.',',')) end
-        return tostring(math.floor(value))
-    end
-    local function updateStats()
-        local debug=ctx.debug()
-        local round=game.ReplicatedStorage:FindFirstChild('Round')
-        local stats=player:FindFirstChild('RoundStats')
-        local shop=player:FindFirstChild('Shop')
-        local leaders=player:FindFirstChild('leaderstats')
-        local char=player.Character
-        local hum=char and char:FindFirstChildOfClass('Humanoid')
-        local status=round and round:GetAttribute('Status') or 'Lobby'
-        local special=round and round:GetAttribute('Special') or ''
-        local map=stats and stats:GetAttribute('Map') or ''
-        roundTitle.Text=status=='Round' and 'Rodada em andamento' or (status=='Intermission' and 'Intervalo entre rodadas' or 'Preparando a próxima rodada')
-        roundSubtitle.Text=(map~='' and tostring(map):gsub('_',' ') or 'Lobby')..'  /  '..(special~='' and tostring(special) or 'Normal')
-        local ends=round and round:GetAttribute('EndsAt')
-        local remaining=type(ends)=='number' and math.max(0,math.ceil(ends-workspace:GetServerTimeNow())) or 0
-        clock.Text=string.format('%02d:%02d',math.floor(remaining/60),remaining%60)
-        local dogs=0
-        local folder=workspace:FindFirstChild('NPCs')
-        if folder then for _,model in ipairs(folder:GetChildren()) do local h=model:FindFirstChildOfClass('Humanoid'); if h and h.Health>0 then dogs+=1 end end end
-        statValues.Dogs.Text=tostring(dogs)
-        statValues.Coins.Text=shortNumber(shop and shop:GetAttribute('Coins'))
-        local survivals=leaders and leaders:FindFirstChild('Survivals')
-        statValues.Survivals.Text=survivals and tostring(survivals.Value) or '—'
-        local hp,maxHp=hum and hum.Health or 0,hum and hum.MaxHealth or 100
-        statValues.Health.Text=string.format('%.0f / %.0f',hp,maxHp)
-        healthFill.Size=UDim2.fromScale(math.clamp(hp/math.max(1,maxHp),0,1),1)
-        healthFill.BackgroundColor3=hp<=maxHp*.25 and C.red or accent()
-        local tool=char and char:FindFirstChildOfClass('Tool')
-        local loaded,reserve=tool and tool:GetAttribute('Loaded'),tool and tool:GetAttribute('Reserve')
-        equipmentValue.Text=tool and tool.Name or 'Nenhum item equipado'
-        if type(loaded)=='number' then equipmentValue.Text..=string.format('  •  %.0f / %.0f munições',loaded,tonumber(reserve) or 0) end
-        local turret=debug and debug.turret
-        local ping=debug and debug.ping and math.floor(debug.ping()*2000) or 0
-        equipmentNote.Text=(turret and turret._manning and 'Torreta montada' or 'Torreta em espera')..'  •  Ping '..ping..' ms  •  Insert: painel'
-        local god=debug and debug.godStats or {}
-        local struggle=debug and debug.struggleStats or {}
-        protectionValue.Text=string.format('%d arrastos  /  %d apertos aceitos',god.grabs or 0,struggle.credit or 0)
-        protectionDetail.Text=string.format('%d quedas de vida registradas  •  %d bloqueios de ragdoll',god.drops or 0,god.ragdollBlocks or 0)
-        if god.lastErr or struggle.lastErr then protectionDetail.Text='Uma ação encontrou erro. Consulte o console.'; protectionDetail.TextColor3=C.red else protectionDetail.TextColor3=C.muted end
-        local active=0
-        for _,key in ipairs(featureKeys) do if state[key] and not (ctx.unavailable and ctx.unavailable[key]) then active+=1 end end
-        activeLabel.Text=active..' recursos ativos'
-    end
-    local function refresh()
-        for _,widget in pairs(widgets) do widget.refresh(false) end
-        for _,callback in ipairs(refreshers) do callback() end
-        fovCircle.Visible=state.silentAim==true
-        updateStats()
-    end
-    local accumulator=0
-    connect(RunService.Heartbeat,function(dt)
-        accumulator+=dt
-        if accumulator>=.2 then accumulator=0; if alive then clampWindow(); refresh() end end
-    end)
-    local api={gui=gui,root=root,fovCircle=fovCircle,fovLabel=fovLabel,pages=pages,widgets=widgets,selectTab=selectTab,set=set,setTheme=setTheme,setVisible=setVisible,refresh=refresh,pointerFov=pointerFov,priorityButtons=priorityButtons}
-    function api.getTheme() return theme end
-    function api.getTab() return currentTab end
-    function api.cleanup()
-        if not alive then return end
-        alive=false
-        for _,connection in ipairs(connections) do connection:Disconnect() end
-        for _,tween in pairs(tweens) do pcall(function() tween:Cancel() end) end
-        gui:Destroy()
-    end
-    clampWindow(); setTheme(theme); selectTab('Painel'); refresh()
-    return api
-end
-	end)()
-	local view = createCaesUi({
-		player=LocalPlayer, state=state,
-		set=function(key,value) _G.__CGM_DEBUG.set(key,value) end,
+
+	for name,values in pairs(savedStats) do
+		local target = _G.__CGM_DEBUG[name]
+		if target then for key,value in pairs(values) do target[key]=value end end
+	end
+	-- CAES_RETROBOX_API2
+	local backendSet = _G.__CGM_DEBUG.set
+	local view = createCaesRetroUi({
+		Library=Library, player=LocalPlayer, state=state,
+		set=backendSet,
 		debug=function() return _G.__CGM_DEBUG end,
 		unload=unload,
+		resources={render=renderConn,shots=shotConn,character=godCharConn},
 		unavailable={
 			infStamina=not Sprint, autoMini=not Skill,
 			silentAim=not (hookOk and fireOk), autoReload=not reloadOk,
@@ -1294,14 +1146,17 @@ end
 	lastFovText=fovLabel.Text
 	uiCleanup=view.cleanup
 	_G.__CGM_DEBUG.ui=view
+	_G.__CGM_DEBUG.set=view.set
 	print("[cgm] menu pronto — sprint:", Sprint ~= nil, "skill:", Skill ~= nil, "hooks:", "nearest=" .. tostring(hookOk), "fire=" .. tostring(fireOk), "reload=" .. tostring(reloadOk), "turret=" .. tostring(turretOk), "predict=" .. tostring(state.predict)) 
 	if _G.__CGM_DEBUG then
 		print("[cgm] reloadHooked=", _G.__CGM_DEBUG.reloadHooked, "reloads=", _G.__CGM_DEBUG.reloadStats.reloads)
 	end
 end
-if _G.__CGM_LOADED then
-	print("[cgm] ja ativo, ignorando re-execucao")
-else
-	_G.__CGM_LOADED = true
-	main()
-end
+task.defer(function()
+	local ok,err=xpcall(main,function(message) return debug.traceback(tostring(message),2) end)
+	if not ok then
+		local current=_G.__CGM_DEBUG
+		if current and current.uiWindow and current.unload then pcall(current.unload) end
+		warn("Cães Retro: "..tostring(err))
+	end
+end)
